@@ -1,9 +1,9 @@
-# The Pensieve 🧠
+# The Pensieve 
 
 > *"The mind is not a vessel to be filled, but a fire to be kindled."*  
 > — Plutarch
 
-A local AI thought experiment runner. A 1.5B DeepSeek-R1 model is left alone with a
+ A 1.5B DeepSeek-R1 model is left alone with a
 philosophical prompt — stripped of all modern knowledge, asked to reason only from
 its senses — and told to think out loud.
 
