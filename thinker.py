@@ -44,7 +44,13 @@ REPO_ROOT         = Path(__file__).parent
 
 # How many tokens (rough estimate) to allow in rolling context
 # deepseek-r1:1.5b has a 4096-token context window
-MAX_CONTEXT_TOKENS = 3000   # leave headroom for the response
+MAX_CONTEXT_TOKENS = 2500   # leave headroom for the response
+
+# Max tokens the model may generate in a single turn
+MAX_TOKENS_PER_TURN = 600
+
+# If the same ~sentence appears this many times in one turn → abort that turn
+REPEAT_THRESHOLD = 3
 
 # Max number of model turns before the script stops
 MAX_TURNS         = 40
@@ -165,25 +171,54 @@ def stream_generate(prompt: str, history: list[dict]) -> str:
         "stream": True,
         "options": {
             "num_ctx": 4096,
+            "num_predict": MAX_TOKENS_PER_TURN,   # hard cap per turn
             "temperature": 0.8,
-            "top_p": 0.95,
-            "repeat_penalty": 1.1,
-        }
+            "top_p": 0.92,
+            "repeat_penalty": 1.35,               # strong repetition suppression
+            "repeat_last_n": 128,
+        },
+        "stop": [BREAK_MARKER],                   # Ollama stops generation at break
     }
 
+    import json
+
     full_response = ""
+    # Rolling window of the last ~200 chars for live repetition detection
+    _window: list[str] = []
+    _sentence_counts: dict[str, int] = {}
+    _aborted = False
+
+    def _check_repetition(text: str) -> bool:
+        """Return True if we should abort — same sentence seen REPEAT_THRESHOLD times."""
+        # Split on sentence-ending punctuation to get rough sentences
+        sentences = re.split(r'(?<=[.!?\n])\s+', text.strip())
+        for s in sentences:
+            s = s.strip().lower()
+            if len(s) < 20:          # ignore very short fragments
+                continue
+            _sentence_counts[s] = _sentence_counts.get(s, 0) + 1
+            if _sentence_counts[s] >= REPEAT_THRESHOLD:
+                return True
+        return False
+
     try:
         with requests.post(url, json=payload, stream=True, timeout=300) as resp:
             resp.raise_for_status()
             for line in resp.iter_lines():
                 if not line:
                     continue
-                import json
                 chunk = json.loads(line)
                 token = chunk.get("message", {}).get("content", "")
                 if token:
                     print(token, end="", flush=True)
                     full_response += token
+                    # Live repetition check on accumulated text
+                    if len(full_response) % 200 < len(token):  # check every ~200 chars
+                        if _check_repetition(full_response):
+                            print("\n[REPEAT GUARD] Loop detected — aborting this turn.",
+                                  file=sys.stderr)
+                            _aborted = True
+                            break
                 if chunk.get("done"):
                     break
     except requests.exceptions.RequestException as e:
@@ -191,6 +226,23 @@ def stream_generate(prompt: str, history: list[dict]) -> str:
         raise
 
     print()  # newline after streaming ends
+
+    if _aborted:
+        # Trim the repeated tail so we don't write garbage to the file
+        # Keep only content up to the first repeated sentence
+        lines = full_response.split("\n")
+        seen: set[str] = set()
+        clean_lines: list[str] = []
+        for ln in lines:
+            key = ln.strip().lower()
+            if key and key in seen and len(key) > 20:
+                break
+            clean_lines.append(ln)
+            if key:
+                seen.add(key)
+        full_response = "\n".join(clean_lines)
+        full_response += "\n\n---BREAK---"  # force a break so we commit what we have
+
     return full_response
 
 
