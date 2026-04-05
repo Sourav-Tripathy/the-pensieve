@@ -1,2 +1,5 @@
-2026-04-05T08:59:41Z | INFO | [VALIDATE_SUDOKU] solved=True errors=0
-2026-04-05T09:14:13Z | INFO | [VALIDATE_SUDOKU] solved=True errors=0
+2026-04-05T09:27:35Z | INFO | [WRITE_REASONING] turn=0 chars=461 file=reasoning_sudoku_solver_20260405_035734.md
+2026-04-05T09:27:35Z | INFO | [SESSION_START] task=sudoku-solver file=reasoning_sudoku_solver_20260405_035734.md
+2026-04-05T03:57:35Z | TURN_START turn=1
+2026-04-05T09:27:35Z | INFO | [TURN_START] turn=1
+2026-04-05T03:58:43Z | TURN_RESPONSE chars=615
