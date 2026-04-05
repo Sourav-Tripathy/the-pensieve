@@ -24,10 +24,11 @@ from pathlib import Path
 # ─────────────────────────────────────────────
 # PATHS  (relative to this file's directory)
 # ─────────────────────────────────────────────
-REPO_ROOT      = Path(__file__).parent
-REASONING_FILE = REPO_ROOT / "reasoning.md"
-LOGS_DIR       = REPO_ROOT / "logs"
-LOGS_FILE      = LOGS_DIR / "session.log"
+REPO_ROOT    = Path(__file__).parent
+RESULTS_FILE = REPO_ROOT / "results.md"
+LOGS_DIR     = REPO_ROOT / "logs"
+LOGS_FILE    = LOGS_DIR / "session.log"
+# NOTE: REASONING_FILE is session-specific and passed in as a Path argument.
 
 # ─────────────────────────────────────────────
 # LOGGER SETUP
@@ -71,24 +72,27 @@ def log_event(event: str, detail: str = "") -> dict:
 # TOOL: write_reasoning
 # ─────────────────────────────────────────────
 
-def write_reasoning(text: str, turn: int = 0, append: bool = True) -> dict:
+def write_reasoning(text: str, turn: int = 0, append: bool = True,
+                    reasoning_file: Path | None = None) -> dict:
     """
-    Write or append a reasoning block to reasoning.md.
+    Write or append a reasoning block to the session reasoning file.
 
     Args:
-        text   : the text to write
-        turn   : turn number (0 = header write)
-        append : if False, overwrite the file completely
+        text           : the text to write
+        turn           : turn number (0 = header write)
+        append         : if False, overwrite the file completely
+        reasoning_file : Path to the session-specific reasoning file
     """
+    target = reasoning_file or (REPO_ROOT / "reasoning.md")
     try:
         mode = "a" if append else "w"
-        with open(REASONING_FILE, mode, encoding="utf-8") as f:
+        with open(target, mode, encoding="utf-8") as f:
             if turn:
                 f.write(f"\n### Step {turn}\n\n")
             f.write(text.strip())
             f.write("\n\n")
-        log_event("WRITE_REASONING", f"turn={turn} chars={len(text)}")
-        return _ok(None, "reasoning.md updated")
+        log_event("WRITE_REASONING", f"turn={turn} chars={len(text)} file={target.name}")
+        return _ok(None, f"{target.name} updated")
     except OSError as e:
         return _err(f"write_reasoning failed: {e}")
 
@@ -97,18 +101,56 @@ def write_reasoning(text: str, turn: int = 0, append: bool = True) -> dict:
 # TOOL: read_reasoning
 # ─────────────────────────────────────────────
 
-def read_reasoning() -> dict:
+def read_reasoning(reasoning_file: Path | None = None) -> dict:
     """
-    Return the current contents of reasoning.md.
+    Return the current contents of the session reasoning file.
     Useful for the model to re-read its own prior steps.
     """
+    target = reasoning_file or (REPO_ROOT / "reasoning.md")
     try:
-        if not REASONING_FILE.exists():
-            return _ok("", "reasoning.md does not exist yet")
-        content = REASONING_FILE.read_text(encoding="utf-8")
-        return _ok(content, f"read {len(content)} chars from reasoning.md")
+        if not target.exists():
+            return _ok("", f"{target.name} does not exist yet")
+        content = target.read_text(encoding="utf-8")
+        return _ok(content, f"read {len(content)} chars from {target.name}")
     except OSError as e:
         return _err(f"read_reasoning failed: {e}")
+
+
+# ─────────────────────────────────────────────
+# TOOL: save_result
+# ─────────────────────────────────────────────
+
+def save_result(
+    task_name: str,
+    puzzle_str: str,
+    solution_str: str,
+    reasoning_file_name: str,
+    extra: str = "",
+) -> dict:
+    """
+    Append a completed-task record to results.md.
+
+    Args:
+        task_name          : name of the task (e.g. "sudoku-solver")
+        puzzle_str         : the original puzzle as a formatted string
+        solution_str       : the completed solution as a formatted string
+        reasoning_file_name: filename of the reasoning journal used (e.g. reasoning_sudoku_20260405.md)
+        extra              : optional extra notes (validation output, etc.)
+    """
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    try:
+        with open(RESULTS_FILE, "a", encoding="utf-8") as f:
+            f.write(f"## {task_name} — {ts}\n\n")
+            f.write(f"**Reasoning journal:** [{reasoning_file_name}](./{reasoning_file_name})\n\n")
+            f.write(f"### Original Puzzle\n\n```\n{puzzle_str}\n```\n\n")
+            f.write(f"### Solution\n\n```\n{solution_str}\n```\n\n")
+            if extra:
+                f.write(f"### Notes\n\n{extra}\n\n")
+            f.write("---\n\n")
+        log_event("SAVE_RESULT", f"task={task_name} reasoning={reasoning_file_name}")
+        return _ok(None, f"result saved to {RESULTS_FILE.name}")
+    except OSError as e:
+        return _err(f"save_result failed: {e}")
 
 
 # ─────────────────────────────────────────────
@@ -165,7 +207,7 @@ def validate_sudoku(grid: list[list[int]]) -> dict:
         errors.append("Grid contains empty cells (0s)")
 
     solved = len(errors) == 0
-    verdict = "✅ Sudoku solved correctly!" if solved else f"❌ Not solved — {len(errors)} error(s)"
+    verdict = "Sudoku solved correctly!" if solved else f"Not solved — {len(errors)} error(s)"
     log_event("VALIDATE_SUDOKU", f"solved={solved} errors={len(errors)}")
     return {"ok": solved, "result": {"solved": solved, "errors": errors}, "message": verdict}
 
@@ -235,6 +277,7 @@ TOOL_REGISTRY: dict[str, callable] = {
     "validate_sudoku": validate_sudoku,
     "git_commit":      git_commit,
     "git_push":        git_push,
+    "save_result":     save_result,
 }
 
 

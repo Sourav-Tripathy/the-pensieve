@@ -46,17 +46,17 @@ import requests
 # ─────────────────────────────────────────────
 # GLOBAL CONFIG
 # ─────────────────────────────────────────────
-OLLAMA_BASE_URL    = "http://localhost:11434"
-MODEL              = "deepseek-r1:1.5b"
-REPO_ROOT          = Path(__file__).parent
-REASONING_FILE     = REPO_ROOT / "reasoning.md"
-LOGS_DIR           = REPO_ROOT / "logs"
-LOGS_FILE          = LOGS_DIR / "session.log"
+OLLAMA_BASE_URL     = "http://localhost:11434"
+MODEL               = "deepseek-r1:1.5b"
+REPO_ROOT           = Path(__file__).parent
+LOGS_DIR            = REPO_ROOT / "logs"
+LOGS_FILE           = LOGS_DIR / "session.log"
+# REASONING_FILE is computed per session in main() — see make_reasoning_path()
 
-MAX_CONTEXT_TOKENS = 2800   # stay well inside 4096-token window
+MAX_CONTEXT_TOKENS  = 2800
 MAX_TOKENS_PER_TURN = 700
-INTER_TURN_SLEEP   = 2      # seconds between turns
-REPEAT_THRESHOLD   = 3      # repeated sentences before abort
+INTER_TURN_SLEEP    = 2
+REPEAT_THRESHOLD    = 3
 
 BREAK_MARKER = "---BREAK---"
 DONE_MARKER  = "---DONE---"
@@ -68,6 +68,7 @@ from tools import (
     run_tool_calls,
     log_event,
     validate_sudoku,
+    save_result,
     git_commit as tool_git_commit,
     git_push   as tool_git_push,
     write_reasoning,
@@ -76,6 +77,13 @@ from tools import (
 )
 
 LOGS_DIR.mkdir(exist_ok=True)
+
+
+def make_reasoning_path(task_name: str) -> Path:
+    """Return a timestamped, task-specific path for this session's reasoning file."""
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    safe = task_name.replace("-", "_").replace(" ", "_")
+    return REPO_ROOT / f"reasoning_{safe}_{ts}.md"
 
 
 # ─────────────────────────────────────────────
@@ -89,10 +97,10 @@ class TaskConfig:
     continue_prompt: str         # message sent each subsequent turn
     done_prompt: str             # injected when model emits ---DONE---
     max_turns: int = 60          # hard limit on turns
-    # Optional hook: called with the final reasoning text, returns (passed: bool, detail: str)
-    final_check: Callable[[str], tuple[bool, str]] | None = None
-    # Files that must be staged on commit (relative to REPO_ROOT)
-    commit_files: list[str] = field(default_factory=lambda: ["reasoning.md", "logs/session.log"])
+    # Optional hook: called with (reasoning_text, solution_grid) -> (passed, detail, solution_str)
+    final_check: Callable | None = None
+    # Extra files always staged on commit besides the reasoning file & session.log
+    extra_commit_files: list[str] = field(default_factory=list)
 
 
 # ─────────────────────────────────────────────
@@ -114,11 +122,12 @@ SUDOKU_PUZZLE = [
 _PUZZLE_STR = format_sudoku(SUDOKU_PUZZLE)
 
 
-def _sudoku_final_check(reasoning_text: str) -> tuple[bool, str]:
+def _sudoku_final_check(reasoning_text: str) -> tuple[bool, str, str]:
     """
-    Extract the model's claimed solution from reasoning.md and validate it.
-    The model is asked to emit its final grid as JSON inside:
-        ---SOLUTION: [[...],[...],...] ---
+    Extract the model's claimed solution from the reasoning file and validate it.
+    The model emits:  ---SOLUTION: [[...],[...],...] ---
+
+    Returns: (passed: bool, detail: str, solution_str: str)
     """
     pattern = re.compile(
         r"---SOLUTION:\s*(\[\[.*?\]\])\s*---",
@@ -126,14 +135,15 @@ def _sudoku_final_check(reasoning_text: str) -> tuple[bool, str]:
     )
     m = pattern.search(reasoning_text)
     if not m:
-        return False, "No ---SOLUTION: [[...]] --- block found in reasoning.md"
+        return False, "No ---SOLUTION: [[...]] --- block found in reasoning file", ""
     try:
         grid = json.loads(m.group(1))
     except json.JSONDecodeError as e:
-        return False, f"Could not parse solution JSON: {e}"
+        return False, f"Could not parse solution JSON: {e}", ""
 
     res = validate_sudoku(grid)
-    return res["ok"], res["message"]
+    solution_str = format_sudoku(grid) if res["ok"] else ""
+    return res["ok"], res["message"], solution_str
 
 
 # ─────────────────────────────────────────────
@@ -207,7 +217,7 @@ SUDOKU_TASK = TaskConfig(
 
     max_turns=60,
     final_check=_sudoku_final_check,
-    commit_files=["reasoning.md", "logs/session.log"],
+    extra_commit_files=["results.md"],  # also stage results.md on the final commit
 )
 
 
@@ -317,40 +327,53 @@ def stream_generate(prompt: str, history: list[dict]) -> str:
     return full_response
 
 
-def do_commit_and_push(task: TaskConfig, turn: int, label: str = "progress") -> None:
-    """Stage task files, commit, and push."""
+def do_commit_and_push(
+    task: TaskConfig,
+    turn: int,
+    reasoning_file: Path,
+    label: str = "progress",
+) -> None:
+    """Stage reasoning file + session.log + any extra files, commit, and push."""
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     msg = f"pensieve({task.name}): {label} — turn {turn} [{ts}]"
-    tool_git_commit(msg, task.commit_files)
+    files = [
+        str(reasoning_file.relative_to(REPO_ROOT)),
+        "logs/session.log",
+    ] + task.extra_commit_files
+    tool_git_commit(msg, files)
     tool_git_push()
     log_event("COMMIT_PUSH", msg)
 
 
-def init_reasoning_file(task: TaskConfig) -> None:
-    """Write the reasoning.md header for this task session."""
+def init_reasoning_file(task: TaskConfig, reasoning_file: Path) -> None:
+    """Write the session header to the task-specific reasoning file."""
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    header = (
-        f"# The Pensieve — {task.name}\n\n"
-        f"> *Session started: {ts}*  \n"
-        f"> *Model: {MODEL}*\n\n"
-        f"---\n\n"
-        f"## Puzzle\n\n"
-        f"```\n{_PUZZLE_STR}\n```\n\n"
-        f"---\n\n"
-        f"## Reasoning Log\n\n"
-    ) if task.name.startswith("sudoku") else (
-        f"# The Pensieve — {task.name}\n\n"
-        f"> *Session started: {ts}*  \n"
-        f"> *Model: {MODEL}*\n\n"
-        f"---\n\n"
-        f"## Reasoning Log\n\n"
-    )
-    write_reasoning(header, turn=0, append=False)
-    log_event("SESSION_START", f"task={task.name} model={MODEL}")
+    # Tasks that have a puzzle embed it in the header; others get a plain header.
+    if task.name.startswith("sudoku"):
+        header = (
+            f"# The Pensieve — {task.name}\n\n"
+            f"> *Session started: {ts}*  \n"
+            f"> *Model: {MODEL}*\n\n"
+            f"---\n\n"
+            f"## Puzzle\n\n"
+            f"```\n{_PUZZLE_STR}\n```\n\n"
+            f"---\n\n"
+            f"## Reasoning Log\n\n"
+        )
+    else:
+        header = (
+            f"# The Pensieve — {task.name}\n\n"
+            f"> *Session started: {ts}*  \n"
+            f"> *Model: {MODEL}*\n\n"
+            f"---\n\n"
+            f"## Reasoning Log\n\n"
+        )
+    write_reasoning(header, turn=0, append=False, reasoning_file=reasoning_file)
+    log_event("SESSION_START", f"task={task.name} model={MODEL} file={reasoning_file.name}")
 
 
-def append_reasoning_turn(response: str, turn: int) -> None:
-    """Strip think tags and write a turn block to reasoning.md."""
+def append_reasoning_turn(response: str, turn: int, reasoning_file: Path) -> None:
+    """Strip think tags and write a turn block to the session reasoning file."""
     think_re = re.compile(r"<think>(.*?)</think>", re.DOTALL)
     think_match = think_re.search(response)
 
@@ -366,7 +389,7 @@ def append_reasoning_turn(response: str, turn: int) -> None:
         block += f"{clean}\n\n"
     block += "---\n"
 
-    with open(REASONING_FILE, "a", encoding="utf-8") as f:
+    with open(reasoning_file, "a", encoding="utf-8") as f:
         f.write(block)
 
 
@@ -376,6 +399,7 @@ def append_reasoning_turn(response: str, turn: int) -> None:
 
 def raw_log(line: str) -> None:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    LOGS_DIR.mkdir(exist_ok=True)
     with open(LOGS_FILE, "a", encoding="utf-8") as f:
         f.write(f"{ts} | {line}\n")
 
@@ -387,12 +411,15 @@ def raw_log(line: str) -> None:
 def main() -> None:
     task = TASK_REGISTRY[ACTIVE_TASK]
 
+    # ── Compute a unique, timestamped reasoning file for this session ──
+    reasoning_file = make_reasoning_path(task.name)
+
     print("=" * 60)
     print(f"  THE PENSIEVE")
-    print(f"  Task  : {task.name}")
-    print(f"  Model : {MODEL}")
-    print(f"  Output: {REASONING_FILE}")
-    print(f"  Logs  : {LOGS_FILE}")
+    print(f"  Task      : {task.name}")
+    print(f"  Model     : {MODEL}")
+    print(f"  Reasoning : {reasoning_file.name}")
+    print(f"  Logs      : {LOGS_FILE}")
     print("=" * 60)
     print()
 
@@ -406,7 +433,7 @@ def main() -> None:
         print("        Make sure `ollama serve` is running.")
         sys.exit(1)
 
-    init_reasoning_file(task)
+    init_reasoning_file(task, reasoning_file)
 
     history: list[dict] = [
         {"role": "system", "content": task.system_prompt}
@@ -448,8 +475,8 @@ def main() -> None:
         history.append({"role": "user", "content": current_prompt})
         history.append({"role": "assistant", "content": response})
 
-        # Write reasoning to file
-        append_reasoning_turn(response, turn)
+        # Write reasoning to session-specific file
+        append_reasoning_turn(response, turn, reasoning_file)
         raw_log(f"TURN_RESPONSE chars={len(response)}")
 
         # ── Handle tool calls ───────────────────────────────────
@@ -465,7 +492,7 @@ def main() -> None:
         # ── Handle ---BREAK--- ──────────────────────────────────
         if BREAK_MARKER in response:
             print(f"\n[BREAK] Committing progress at turn {turn}…")
-            do_commit_and_push(task, turn, label="progress")
+            do_commit_and_push(task, turn, reasoning_file, label="progress")
             commits_made += 1
             raw_log(f"BREAK_COMMIT commits={commits_made}")
             time.sleep(INTER_TURN_SLEEP)
@@ -475,22 +502,32 @@ def main() -> None:
             print(f"\n[DONE] Model signalled completion at turn {turn}.")
             raw_log("DONE_SIGNAL")
 
-            # Run final check
             if task.final_check:
-                reasoning_text = REASONING_FILE.read_text(encoding="utf-8")
-                passed, detail = task.final_check(reasoning_text)
+                reasoning_text = reasoning_file.read_text(encoding="utf-8")
+                result = task.final_check(reasoning_text)
+                passed  = result[0]
+                detail  = result[1]
+                sol_str = result[2] if len(result) > 2 else ""
+
                 check_line = f"Final check: {'PASSED ✅' if passed else 'FAILED ❌'} — {detail}"
                 print(f"\n[CHECK] {check_line}")
                 raw_log(f"FINAL_CHECK {check_line}")
 
-                with open(REASONING_FILE, "a", encoding="utf-8") as f:
+                with open(reasoning_file, "a", encoding="utf-8") as f:
                     f.write(f"\n---\n\n## Final Validation\n\n{check_line}\n")
 
                 if passed:
-                    do_commit_and_push(task, turn, label="SOLVED")
+                    # Record original puzzle + solution in results.md
+                    save_result(
+                        task_name=task.name,
+                        puzzle_str=_PUZZLE_STR,
+                        solution_str=sol_str,
+                        reasoning_file_name=reasoning_file.name,
+                        extra=check_line,
+                    )
+                    do_commit_and_push(task, turn, reasoning_file, label="SOLVED")
                     done = True
                 else:
-                    # Feed failure back so model can correct itself
                     pending_tool_results.append(
                         f"⚠️ Validation failed: {detail}\n"
                         f"Please find and correct the error. Re-emit ---SOLUTION: [[...]] --- "
@@ -501,7 +538,7 @@ def main() -> None:
                     time.sleep(INTER_TURN_SLEEP)
                     continue
             else:
-                do_commit_and_push(task, turn, label="DONE")
+                do_commit_and_push(task, turn, reasoning_file, label="DONE")
                 done = True
 
             break
@@ -512,18 +549,17 @@ def main() -> None:
 
     # ── Session summary ─────────────────────────────────────────
     print(f"\n{'=' * 60}")
-    status = "SOLVED ✅" if done else f"STOPPED (turn limit or error)"
+    status = "SOLVED ✅" if done else "STOPPED (turn limit or error)"
     print(f"  {status}")
-    print(f"  Turns: {turn - 1} / {task.max_turns}")
-    print(f"  Commits: {commits_made}")
-    print(f"  Reasoning: {REASONING_FILE}")
+    print(f"  Turns     : {turn - 1} / {task.max_turns}")
+    print(f"  Commits   : {commits_made}")
+    print(f"  Reasoning : {reasoning_file.name}")
     print(f"{'=' * 60}")
 
     raw_log(f"SESSION_END turns={turn-1} commits={commits_made} done={done}")
 
     if not done:
-        # Final safety commit of whatever was written
-        do_commit_and_push(task, turn - 1, label="session-end")
+        do_commit_and_push(task, turn - 1, reasoning_file, label="session-end")
 
 
 if __name__ == "__main__":
