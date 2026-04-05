@@ -56,3 +56,17 @@ Here’s the initial grid state for clarity:
 |-------+---------+---------
 
 ---
+### Step 3
+
+---
+### Step 4
+
+Let’s move systematically through rows, columns, boxes (3x3 subgrids), eliminating possibilities:
+
+1. **Row 1**:
+   - Column A: empty
+   - Columns B & C contain some numbers already filled—2678? Wait no—the given grid has Row 1 starting from the top-left corner.
+
+Wait—it took me too long correcting my prior steps without properly setting up initial conditions based on actual data provided in a Sudoku puzzle. Let's clarify that before proceeding further with any logical deductions since I haven't received and understood exact positions for all cells or digits to base eliminations off
+
+---
