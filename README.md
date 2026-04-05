@@ -1,63 +1,90 @@
-# The Pensieve 
+# The Pensieve
 
 > *"The mind is not a vessel to be filled, but a fire to be kindled."*  
 > — Plutarch
 
- A 1.5B DeepSeek-R1 model is left alone with a
-philosophical prompt — stripped of all modern knowledge, asked to reason only from
-its senses — and told to think out loud.
-
-Its entire journey: the doubts, the false starts, the sudden clarity, the loops back
-into confusion — all written to a markdown journal and committed to this repo each time
-the model reaches a natural resting point in its thinking.
+A framework for watching **DeepSeek-R1 (1.5b)** tackle structured reasoning tasks — completely autonomously, using pure deduction and a small set of callable tools.  Every step is logged, every insight is committed to git.
 
 ---
 
-## The Experiment
+## The Idea
 
-> You are a human. It is 1000 years ago.  
-> You have never read a book. You have never heard the word "atom" or "matter".  
-> You do not know what things are made of. Nobody does.  
-> You live near a forest. You have fire. You have water. You have stone, wood,  
-> bone, ash, mud, and your own two hands.  
->  
-> But you are curious. Unusually so.  
->  
-> Today you sit by your fire and begin to wonder — not about gods, not about spirits  
-> — but about the **things themselves**. The fire. The wood. The stone. The water.  
-> What are they, really? What are they made of?
+Rather than feeding the model open-ended philosophical prompts, we give it **concrete, verifiable tasks** that require step-by-step reasoning.  The model works in a loop, calling tools when it needs them, writing its reasoning to a journal, and committing progress to this repo at every natural checkpoint.
+
+The current task: **solve a 9×9 Sudoku puzzle using pure logical deduction — no programs, no guessing**.
+
+---
+
+## Current Task — Sudoku Solver
+
+The model is given a classic medium-difficulty Sudoku:
+
+```
++-------+-------+-------+
+| 5 3 _ | _ 7 _ | _ _ _ |
+| 6 _ _ | 1 9 5 | _ _ _ |
+| _ 9 8 | _ _ _ | _ 6 _ |
++-------+-------+-------+
+| 8 _ _ | _ 6 _ | _ _ 3 |
+| 4 _ _ | 8 _ 3 | _ _ 1 |
+| 7 _ _ | _ 2 _ | _ _ 6 |
++-------+-------+-------+
+| _ 6 _ | _ _ _ | 2 8 _ |
+| _ _ _ | 4 1 9 | _ _ 5 |
+| _ _ _ | _ 8 _ | _ 7 9 |
++-------+-------+-------+
+```
 
 **Rules the model must follow:**
-- Reason only from what can be directly observed with the senses
-- Never use modern words or concepts it could not have invented itself
-- Think out loud — show every step, every doubt
-- Run mental experiments — burn things, boil things, crush things in its mind
-- Follow every observation to its deepest possible question
-- Do not rush to a conclusion. Earn it.
+- Reason step-by-step from the given clues only
+- Use candidate elimination (naked singles, hidden singles)
+- No trial-and-error / backtracking guessing
+- Call `validate_sudoku` tool when it believes the grid is complete
+- Emit `---SOLUTION: [[...]] ---` then `---DONE---` when finished
 
 ---
 
-## How It Works
+## Architecture
 
 ```
-thinker.py
+thinker.py          ← task-agnostic reasoning loop
     │
-    ├─ Sends the thought experiment to DeepSeek-R1:1.5b via Ollama
-    │    (streaming, so you see tokens in real time)
+    ├─ TASK_REGISTRY  ← plug in new tasks here (change ACTIVE_TASK)
     │
-    ├─ Manages a rolling context window (≤ 3000 tokens)
-    │    to stay within the model's 4096-token limit
+    ├─ streams tokens from DeepSeek-R1:1.5b via Ollama
     │
-    ├─ Detects ---BREAK--- markers that the model emits
-    │    when it has completed a full thought segment
+    ├─ detects ---TOOL: <name> {args}--- calls → dispatches via tools.py
     │
-    ├─ Writes each turn to thoughts.md with internal
-    │    reasoning hidden in collapsible <details> blocks
+    ├─ writes each reasoning step to reasoning.md
     │
-    └─ Commits + pushes to GitHub on every break
+    ├─ commits + pushes on every ---BREAK--- marker
+    │
+    └─ runs final_check() on ---DONE---, commits if verified ✅
+
+tools.py            ← tool library (callable by the model)
+    ├─ validate_sudoku  → checks if a 9×9 grid is correctly solved
+    ├─ write_reasoning  → append a block to reasoning.md
+    ├─ read_reasoning   → returns current reasoning.md contents
+    ├─ git_commit       → stage + commit files
+    ├─ git_push         → push to origin
+    └─ log_event        → write a structured entry to logs/session.log
+
+reasoning.md        ← the model's step-by-step journal (auto-generated)
+logs/session.log    ← structured log of all loop events
 ```
 
-The model can take up to 40 turns before the session ends automatically.
+---
+
+## Adding a New Task
+
+1. Define a `TaskConfig` instance in `thinker.py` with:
+   - `system_prompt` — role & rules
+   - `first_prompt` / `continue_prompt` / `done_prompt`
+   - `final_check` — optional validation function
+   - `commit_files` — which files to stage on commit
+2. Add it to `TASK_REGISTRY`
+3. Set `ACTIVE_TASK = "your_task_name"`
+4. Run `python thinker.py`
 
 ---
 
@@ -73,11 +100,12 @@ ollama pull deepseek-r1:1.5b
 # 3. Install Python dependency
 pip install requests
 
-# 4. Run the thinker
+# 4. Run a task
 python thinker.py
 ```
 
-The thoughts accumulate in [`thoughts.md`](./thoughts.md).
+Reasoning accumulates in [`reasoning.md`](./reasoning.md).  
+Session events are logged to [`logs/session.log`](./logs/session.log).
 
 ---
 
@@ -85,17 +113,24 @@ The thoughts accumulate in [`thoughts.md`](./thoughts.md).
 
 | File | Purpose |
 |------|---------|
-| `thinker.py` | Main runner — prompt, stream, write, commit |
-| `thoughts.md` | Auto-generated journal of the AI's thought experiment |
+| `thinker.py` | Task-agnostic reasoning loop + task registry |
+| `tools.py` | Tool library callable by the model |
+| `reasoning.md` | Auto-generated reasoning journal for the current task |
+| `logs/session.log` | Structured event log for the running session |
 | `README.md` | This file |
+
+---
+
+## Task History
+
+| # | Task | Status | Commits |
+|---|------|--------|---------|
+| 1 | Sudoku Solver (medium) | 🔄 In progress | — |
 
 ---
 
 ## Why?
 
-Because the best way to understand how humans once wrestled with the deepest
-questions of nature — *what is fire? what is stone? is there something beneath
-all things?* — might be to watch a mind do it again, from scratch, constrained
-to nothing but its senses and its stubbornness.
+Because watching a 1.5-billion-parameter model work through a logic puzzle — cell by cell, elimination by elimination, with every doubt and correction committed to git — is a surprisingly compelling window into how structured reasoning actually works (or fails) at small scale.
 
-The commits are the breadcrumbs. The markdown is the journey.
+The commits are the breadcrumbs.  The reasoning.md is the proof of work.
