@@ -40,3 +40,19 @@ Wait—that approach seems off because I don't know which cells have certain val
 * **
 
 ---
+### Step 2
+
+---
+
+### Step-by-Step Solution:
+We will solve **Row by Column** using pure logical reasoning. Here is our systematic process:
+
+#### Initial Grid State
+The provided Sudoku puzzle starts with some cells already filled, while others remain blank (denoted as "0"). Our goal is to fill all empty cells following these constraints: every row, column, and 3x3 box must contain digits 1 through 9 exactly once; no repetition across any of those categories—each cell can hold only one digit at a time.
+
+Here’s the initial grid state for clarity:
+
+|       |   2 6     |    7    1 |
+|-------+---------+---------
+
+---
